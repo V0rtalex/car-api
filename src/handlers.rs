@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use axum::{Json, extract::{Path, State}, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::{Path, State}, http::{StatusCode}, response::IntoResponse};
 use serde_json::json;
 use uuid::Uuid;
-use crate::{AppState, model::CarModel, schema::CarSchema};
+use crate::{AppState, model::CarModel, schema::{CarSchema, UpdateCarSchema}};
 
 pub async fn hello_world() -> impl IntoResponse {
     let json_response = json!({
@@ -107,4 +107,109 @@ pub async fn get_car_handler(
                 Json(json!({"status": "error", "message": format!("{:?}", e)})),
         )),
     }
+}
+
+pub async fn delete_car_handler(
+    Path(car_id): Path<Uuid>,
+    State(data): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let query_result = sqlx::query_as!(
+        CarModel,
+        r#"DELETE FROM cars WHERE id=$1 RETURNING *"#,
+        &car_id
+    )
+        .fetch_one(&data.db)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "status": "error",
+                    "message": "car not found"
+                })),
+            ),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": format!("{:?}", e)
+                })),
+            ),
+        })?;
+
+    let response = json!({
+        "status": "success",
+        "message": "car deleted successfully",
+        "data": {
+            "deleted_car": query_result
+        }
+    });
+
+    Ok(Json(response))
+}
+
+pub async fn update_car_handler(
+    Path(car_id): Path<Uuid>,
+    State(data): State<Arc<AppState>>,
+    Json(body): Json<UpdateCarSchema>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let query_result = sqlx::query_as!(
+        CarModel,
+        r#"SELECT * FROM cars WHERE id=$1"#,
+        &car_id
+    )
+        .fetch_one(&data.db)
+        .await;
+
+    let car = match query_result {
+        Ok(car) => car,
+        Err(sqlx::Error::RowNotFound) => {
+            let error_response = serde_json::json!({
+                "status": "error",
+                "message": format!("Car with ID: {} not found", car_id)
+            });
+            return Err((StatusCode::NOT_FOUND, Json(error_response)));
+        }
+        Err(e) => {
+            return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "error",
+                        "message": format!("{:?}", e)
+                    }))
+            ))
+        }
+    };
+
+    let new_make = body.make.as_ref().unwrap_or(&car.make);
+    let new_model = body.model.as_ref().unwrap_or(&car.model);
+    let new_spotted = body.spotted.unwrap_or(car.spotted);
+
+    let updated_car = sqlx::query_as!(
+        CarModel,
+        r#"UPDATE cars SET make = $1, model = $2, spotted = $3 WHERE id=$4 RETURNING *"#,
+        &new_make,
+        &new_model,
+        &new_spotted,
+        &car_id
+    )
+        .fetch_one(&data.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": format!("{:?}", e)
+                }))
+            )
+        })?;
+
+    let response = json!({
+        "status": "success",
+        "data": {
+            "car": updated_car
+        }
+    });
+    Ok(Json(response))
 }
