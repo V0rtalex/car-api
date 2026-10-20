@@ -8,7 +8,7 @@ mod handlers;
 mod model;
 mod route;
 mod schema;
-
+mod handlers_responses;
 
 pub struct AppState {
     db : PgPool,

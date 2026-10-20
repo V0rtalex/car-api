@@ -1,22 +1,23 @@
 use std::sync::Arc;
 
-use axum::{Json, extract::{Path, State}, http::{StatusCode}, response::IntoResponse};
-use serde_json::json;
+use crate::{
+    AppState,
+    handlers_responses::*,
+    model::CarModel,
+    schema::{CarSchema, UpdateCarSchema},
+};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
+use sqlx::postgres::PgDatabaseError;
 use uuid::Uuid;
-use crate::{AppState, model::CarModel, schema::{CarSchema, UpdateCarSchema}};
 
-pub async fn hello_world() -> impl IntoResponse {
-    let json_response = json!({
-        "status": "ok",
-        "message": "Hello, World!"
-    });
-    Json(json_response)
-}
-
+//#[axum::debug_handler]
 pub async fn create_car_handler(
     State(data): State<Arc<AppState>>,
     Json(body): Json<CarSchema>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<CarSuccess<CarModel>, CarError> {
     let id = uuid::Uuid::new_v4();
     let car = sqlx::query_as!(
         CarModel,
@@ -27,157 +28,104 @@ pub async fn create_car_handler(
         &body.spotted
     )
     .fetch_one(&data.db)
-    .await
-    .map_err(|e| e.to_string());
+    .await;
 
-    if let Err(err) = car {
-        if err.to_string().contains("duplicate key value") {
-            let error_response = serde_json::json!({
-                "status": " error",
-                "message": "Car already exists",
-            });
-            return Err((StatusCode::CONFLICT, Json(error_response)));
-        }
-        return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": format!("{:?}", err)})),
-        ));
+    match car {
+        Ok(car) => Ok(CarSuccess {
+            message: "car added successfully".to_string(),
+            data: car,
+        }),
+
+        Err(sqlx::Error::Database(db_err)) => match db_err.try_downcast::<PgDatabaseError>() {
+            Ok(pg_err) => match pg_err.code() {
+                "23505" => Err(CarError::CarAlreadyExists(body)),
+                _ => Err(CarError::UnknownError),
+            },
+            Err(_) => Err(CarError::UnknownError),
+        },
+        Err(_) => Err(CarError::UnknownError),
     }
-
-    let car_response = json!({
-        "status": "success",
-        "data": json!({
-            "car": car
-        })
-    });
-
-    Ok(Json(car_response))
 }
 
+//#[axum::debug_handler]
 pub async fn car_list_handler(
     State(data): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<CarSuccess<Vec<CarModel>>, CarError> {
     let cars = sqlx::query_as!(CarModel, r#"SELECT * FROM cars ORDER by make"#)
         .fetch_all(&data.db)
-        .await
-        .map_err(|e| {
-            let error_message = serde_json::json!({
-                "status": "error",
-                "message": format!("Database error { }", e),
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_message))
-        })?;
+        .await;
 
-    let json_response = serde_json::json!({
-        "status": "success",
-        "count": cars.len(),
-        "notes": cars
-    });
+    match cars {
+        Ok(cars) => Ok(CarSuccess {
+            message: "Car list fetched successfully".to_string(),
+            data: cars,
+        }),
 
-    Ok(Json(json_response))
+        Err(_) => Err(CarError::UnknownError),
+    }
 }
 
+//#[axum::debug_handler]
 pub async fn get_car_handler(
     Path(car_id): Path<Uuid>,
     State(data): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<CarSuccess<CarModel>, CarError> {
     let query_result = sqlx::query_as!(CarModel, r#"SELECT * FROM cars WHERE id = $1"#, car_id)
         .fetch_one(&data.db)
         .await;
 
     match query_result {
-        Ok(car) => {
-            let car_response = serde_json::json!({
-                "status": "success",
-                "data": serde_json::json!({
-                    "car": car
-                })
-            });
-            Ok(Json(car_response))
-        }
-        Err(sqlx::Error::RowNotFound) => {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": format!("Car with id {} not found", car_id)
-            });
-            Err((StatusCode::NOT_FOUND, Json(error_response)))
-        }
-        Err(e) => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": format!("{:?}", e)})),
-        )),
+        Ok(car) => Ok(CarSuccess {
+            message: "car fetched successfully".to_string(),
+            data: car,
+        }),
+        Err(sqlx::Error::RowNotFound) => Err(CarError::CarWithIdNotFound(car_id)),
+        Err(_) => Err(CarError::UnknownError),
     }
 }
 
+//#[axum::debug_handler]
 pub async fn delete_car_handler(
     Path(car_id): Path<Uuid>,
     State(data): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<CarSuccess<CarModel>, CarError> {
     let query_result = sqlx::query_as!(
         CarModel,
         r#"DELETE FROM cars WHERE id=$1 RETURNING *"#,
         &car_id
     )
-        .fetch_one(&data.db)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::RowNotFound => (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "status": "error",
-                    "message": "car not found"
-                })),
-            ),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "message": format!("{:?}", e)
-                })),
-            ),
-        })?;
+    .fetch_one(&data.db)
+    .await;
 
-    let response = json!({
-        "status": "success",
-        "message": "car deleted successfully",
-        "data": {
-            "deleted_car": query_result
+    match query_result {
+        Ok(car) => {
+            Ok(CarSuccess {
+                message: "car deleted successfully".to_string(),
+                data: car,
+            })
         }
-    });
 
-    Ok(Json(response))
+        Err(_) => Err(CarError::UnknownError),
+    }
 }
 
+//#[axum::debug_handler]
 pub async fn update_car_handler(
     Path(car_id): Path<Uuid>,
     State(data): State<Arc<AppState>>,
     Json(body): Json<UpdateCarSchema>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let query_result = sqlx::query_as!(
-        CarModel,
-        r#"SELECT * FROM cars WHERE id=$1"#,
-        &car_id
-    )
+) -> Result<CarSuccess<CarModel>, CarError> {
+    let query_result = sqlx::query_as!(CarModel, r#"SELECT * FROM cars WHERE id=$1"#, &car_id)
         .fetch_one(&data.db)
         .await;
 
     let car = match query_result {
         Ok(car) => car,
         Err(sqlx::Error::RowNotFound) => {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": format!("Car with ID: {} not found", car_id)
-            });
-            return Err((StatusCode::NOT_FOUND, Json(error_response)));
+            return Err(CarError::CarWithIdNotFound(car_id));
         }
-        Err(e) => {
-            return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "status": "error",
-                        "message": format!("{:?}", e)
-                    }))
-            ))
+        Err(_) => {
+            return Err(CarError::UnknownError);
         }
     };
 
@@ -189,27 +137,20 @@ pub async fn update_car_handler(
         CarModel,
         r#"UPDATE cars SET make = $1, model = $2, spotted = $3 WHERE id=$4 RETURNING *"#,
         &new_make,
+    
         &new_model,
         &new_spotted,
         &car_id
     )
-        .fetch_one(&data.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "message": format!("{:?}", e)
-                }))
-            )
-        })?;
+    .fetch_one(&data.db)
+    .await;
 
-    let response = json!({
-        "status": "success",
-        "data": {
-            "car": updated_car
-        }
-    });
-    Ok(Json(response))
+    
+    match updated_car {
+        Ok(updated_car) => Ok(CarSuccess{
+            message: "car successfully updated".to_string(),
+            data: updated_car,
+        }),
+        Err(_) => Err(CarError::UnknownError),
+    }
 }

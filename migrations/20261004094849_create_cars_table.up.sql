@@ -4,5 +4,6 @@ CREATE TABLE IF NOT EXISTS cars (
     make TEXT NOT NULL,
     model TEXT NOT NULL,
     spotted INTEGER NOT NULL,
-    created_at TIMESTAMPTZ NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NULL DEFAULT NOW(),
+    unique (make, model)
 );
