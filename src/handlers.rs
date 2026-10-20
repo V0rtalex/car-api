@@ -94,16 +94,15 @@ pub async fn delete_car_handler(
         r#"DELETE FROM cars WHERE id=$1 RETURNING *"#,
         &car_id
     )
-    .fetch_one(&data.db)
+    .fetch_optional(&data.db)
     .await;
 
     match query_result {
-        Ok(car) => {
-            Ok(CarSuccess {
-                message: "car deleted successfully".to_string(),
-                data: car,
-            })
-        }
+        Ok(Option::None) => Err(CarError::CarWithIdNotFound(car_id)),
+        Ok(Some(car)) =>  Ok(CarSuccess{
+            message: "car deleted successfully".to_string(),
+            data: car,
+        }),
 
         Err(_) => Err(CarError::UnknownError),
     }
